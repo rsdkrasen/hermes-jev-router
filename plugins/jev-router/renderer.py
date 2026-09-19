@@ -8,27 +8,19 @@ from typing import Any, Dict, List, Optional, Sequence
 from .schemas import RoundControlJudgment
 
 
-# Phrase-level success evidence. Short tokens MUST use word boundaries so that
-# "ok" does not match inside "Token" / "looking" / "hooks". That substring bug
-# finished tool rounds early and broke multi-step tool calling when the core
-# post_tool_round_control patch was applied.
+# Strong verification phrases only. Bare words like "ok" / "done" / "success"
+# are too common in tool JSON (e.g. lint: {"status": "ok"}) and must not
+# trigger deterministic fast-path finish.
 _SUCCESS_PHRASES = (
     "0 failures",
     "0 failed",
     "all tests passed",
     "tests passed",
-    "successfully deleted",
-    "successfully removed",
-    "successfully created",
-    "successfully wrote",
-    "successfully updated",
 )
 
-_SUCCESS_WORD_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])("
-    r"passed|success|successful|deleted|removed|created|updated|wrote|done|"
-    r"complete|completed|ok|okay"
-    r")(?![A-Za-z0-9_])"
+# Clear test-count outcomes: "12 passed", "3 passed".
+_SUCCESS_VERIFY_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])\d+\s+passed(?![A-Za-z0-9_])"
 )
 
 _FAILURE_RE = re.compile(
@@ -36,6 +28,42 @@ _FAILURE_RE = re.compile(
     r"error|failed|failure|traceback|exception|fatal|denied|incomplete|"
     r"not found|no such file"
     r")(?![A-Za-z0-9_])"
+)
+
+# File editors never fast-path — mid-task writes need the main model to continue.
+_FILE_MUTATION_TOOLS = frozenset(
+    {
+        "write_file",
+        "edit_file",
+        "patch",
+        "apply_patch",
+        "delete_file",
+        "move_file",
+        "create_file",
+    }
+)
+
+# Only terminal/bash/shell-style rounds may use deterministic fast-path.
+_TERMINAL_VERIFY_TOOLS = frozenset(
+    {
+        "terminal",
+        "bash",
+        "shell",
+        "run_terminal_cmd",
+        "execute_code",
+    }
+)
+
+_FILE_EDITOR_MARKERS = (
+    "write_file",
+    "edit_file",
+    "apply_patch",
+    "delete_file",
+    "move_file",
+    "create_file",
+    "write",
+    "edit",
+    "patch",
 )
 
 
@@ -47,7 +75,7 @@ def _has_success_evidence(text: str) -> bool:
     low = text.lower()
     if any(p in low for p in _SUCCESS_PHRASES):
         return True
-    return bool(_SUCCESS_WORD_RE.search(text))
+    return bool(_SUCCESS_VERIFY_RE.search(text))
 
 
 def _tool_names(
@@ -66,6 +94,23 @@ def _tool_names(
     return names
 
 
+def _is_file_mutation_tool(name: str, mutating_tools: Sequence[str]) -> bool:
+    """True for write/edit/patch/delete/move/create style tools (not terminal)."""
+    if name in _FILE_MUTATION_TOOLS:
+        return True
+    if name in _TERMINAL_VERIFY_TOOLS:
+        return False
+    mut = set(mutating_tools)
+    if name not in mut:
+        return False
+    low = name.lower().replace("-", "_")
+    return any(m in low for m in _FILE_EDITOR_MARKERS)
+
+
+def _is_terminal_verify_tool(name: str) -> bool:
+    return name in _TERMINAL_VERIFY_TOOLS or name.lower().replace("-", "_") in _TERMINAL_VERIFY_TOOLS
+
+
 def can_fast_path_success(
     *,
     tool_results: Sequence[Dict[str, Any]],
@@ -76,11 +121,13 @@ def can_fast_path_success(
     observational_tools: Sequence[str] = (),
     mutating_tools: Sequence[str] = (),
 ) -> bool:
-    """Obvious success with no narrative expected → skip Jev + main model.
+    """Obvious terminal verification success → skip Jev + main model.
 
-    Prefer continuing to the main model over finishing early. Observational-only
-    rounds never fast-path (reads/greps are mid-task evidence gathering).
+    Prefer continuing to the main model over finishing early. File-mutation
+    rounds and observational-only rounds never fast-path. Bare JSON success
+    tokens (ok/done/created/…) are not enough — only strong test/verify phrases.
     """
+    del mutated  # kept for call-site compatibility; taxonomy drives the gate
     if expects_explanation:
         return False
     if not tool_results:
@@ -89,23 +136,38 @@ def can_fast_path_success(
         return False
 
     joined = _joined_content(tool_results)
-    if _FAILURE_RE.search(joined):
-        return False
-    if not _has_success_evidence(joined):
+    # Strip strong success phrases before failure scan so "0 failed" is not a miss.
+    scrubbed = joined
+    low = joined.lower()
+    for phrase in _SUCCESS_PHRASES:
+        if phrase in low:
+            # case-insensitive remove of each phrase occurrence
+            scrubbed = re.sub(re.escape(phrase), " ", scrubbed, flags=re.IGNORECASE)
+    scrubbed = _SUCCESS_VERIFY_RE.sub(" ", scrubbed)
+    if _FAILURE_RE.search(scrubbed):
         return False
 
     names = _tool_names(tool_calls, tool_results)
+
+    # Never finish after file writes/edits/patches — agent must continue.
+    if any(_is_file_mutation_tool(n, mutating_tools) for n in names):
+        return False
+
     obs = set(observational_tools)
     mut = set(mutating_tools)
 
-    # When taxonomy is available, never finish after observational-only rounds —
-    # those are mid-task (reads/greps), not completed work.
+    # Observational-only rounds are mid-task evidence gathering.
     if names and (obs or mut):
         only_observational = all(n in obs for n in names) and not any(n in mut for n in names)
         if only_observational:
             return False
-        if not mutated and not any(n in mut for n in names):
-            return False
+
+    # Deterministic fast-path is reserved for terminal/bash/shell verification.
+    if not names or not all(_is_terminal_verify_tool(n) for n in names):
+        return False
+
+    if not _has_success_evidence(joined):
+        return False
 
     return True
 

@@ -17,10 +17,19 @@ def test_uses_judgment_bullets():
 
 
 def test_fast_path_gate():
-    mut = ("terminal", "write_file")
+    mut = ("terminal", "write_file", "edit_file", "patch")
     obs = ("read_file",)
     assert can_fast_path_success(
         tool_results=[{"name": "terminal", "content": "12 passed"}],
+        statuses=["ok"],
+        expects_explanation=False,
+        tool_calls=[{"name": "terminal"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=True,
+    )
+    assert can_fast_path_success(
+        tool_results=[{"name": "terminal", "content": "all tests passed"}],
         statuses=["ok"],
         expects_explanation=False,
         tool_calls=[{"name": "terminal"}],
@@ -46,11 +55,43 @@ def test_fast_path_gate():
         observational_tools=obs,
         mutated=True,
     )
+    # File mutation with lint ok / verified must NOT fast-path
+    assert not can_fast_path_success(
+        tool_results=[{
+            "name": "write_file",
+            "content": 'bytes_written: 0\nverified: true\nlint: {"status": "ok"}',
+        }],
+        statuses=["ok"],
+        expects_explanation=False,
+        tool_calls=[{"name": "write_file"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=True,
+    )
+    assert not can_fast_path_success(
+        tool_results=[{"name": "write_file", "content": "successfully wrote path"}],
+        statuses=["ok"],
+        expects_explanation=False,
+        tool_calls=[{"name": "write_file"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=True,
+    )
+    # Observational-only still must not
+    assert not can_fast_path_success(
+        tool_results=[{"name": "read_file", "content": "all tests passed"}],
+        statuses=["ok"],
+        expects_explanation=False,
+        tool_calls=[{"name": "read_file"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=False,
+    )
 
 
 def test_render_fast_path():
     out = render_fast_path(
-        [{"name": "terminal", "content": "deleted ok"}],
+        [{"name": "terminal", "content": "12 passed"}],
         [{"name": "terminal"}],
     )
     assert "Completed" in out or "Done" in out

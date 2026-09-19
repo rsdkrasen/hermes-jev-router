@@ -67,9 +67,9 @@ def test_plugin_policy_matches_helper_shape():
     # Use fast path
     decision = should_finish_round(
         session_id="s",
-        user_goal="rm file",
+        user_goal="run tests",
         tool_calls=[{"name": "terminal"}],
-        tool_results=[{"name": "terminal", "content": "deleted ok", "status": "ok"}],
+        tool_results=[{"name": "terminal", "content": "12 passed", "status": "ok"}],
         statuses=["ok"],
         api_call_count=1,
     )

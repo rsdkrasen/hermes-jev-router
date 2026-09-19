@@ -78,9 +78,9 @@ def test_fast_path_without_jev():
     session.expects_explanation = False
     out = should_finish_round(
         session_id="s1",
-        user_goal="delete temp file",
-        tool_calls=[{"name": "terminal", "args": "rm x"}],
-        tool_results=[{"name": "terminal", "content": "deleted /tmp/x successfully", "status": "ok"}],
+        user_goal="run tests",
+        tool_calls=[{"name": "terminal", "args": "pytest"}],
+        tool_results=[{"name": "terminal", "content": "all tests passed", "status": "ok"}],
         statuses=["ok"],
         api_call_count=1,
     )
