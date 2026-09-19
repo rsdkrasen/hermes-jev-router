@@ -17,7 +17,7 @@ from .policy import check_duplicate, is_mutating, is_observational, should_finis
 from .schemas import GoalClass
 from .state import STORE
 from .telemetry import aggregate, record_event
-from .jev import judge
+from .jev import judge_timed
 
 logger = logging.getLogger("hermes.plugins.jev_router")
 
@@ -40,33 +40,48 @@ def _on_pre_llm_call(
     user_message: str = "",
     conversation_history: Any = None,
     is_first_turn: bool = False,
-    **_: Any,
+    turn_id: str = "",
+    **kwargs: Any,
 ) -> None:
     """F6: capture goal (+ optional cheap classification). Do NOT inject context (cache-friendly)."""
     cfg = get_config()
     if not cfg.enabled:
         return
+    tid = turn_id or str(kwargs.get("turn_id") or "")
     try:
         sid = _session_key(session_id, task_id)
         session = STORE.get(sid)
+        if tid:
+            session.last_turn_id = tid
         text = user_message if isinstance(user_message, str) else ""
         if text.strip():
             session.user_goal = text.strip()[:800]
+        jev_ms = None
         if cfg.preflight_classify and text.strip() and cfg.typesafe_ready:
-            g = judge(GoalClass, {"user_message": text[:600]})
+            g, jev_ms = judge_timed(GoalClass, {"user_message": text[:600]})
+            if jev_ms is not None:
+                session.last_jev_ms = jev_ms
             if g is not None:
                 session.expects_explanation = bool(g.expects_explanation)
                 session.goal_kind = g.goal_kind
                 if g.short_goal:
                     session.user_goal = g.short_goal[:800]
-        record_event(session, "preflight", goal_kind=session.goal_kind,
-                     expects_explanation=session.expects_explanation)
+        ms_kw = {"jev_ms": jev_ms} if jev_ms is not None else {}
+        record_event(
+            session, "preflight",
+            goal_kind=session.goal_kind,
+            expects_explanation=session.expects_explanation,
+            turn_id=tid,
+            **ms_kw,
+        )
     except Exception as exc:
         logger.debug("pre_llm_call failed open: %s", exc)
         try:
             sid = _session_key(session_id, task_id)
-            record_event(STORE.get(sid), "fail_open", hook="pre_llm_call",
-                         reason="exception", error=type(exc).__name__)
+            record_event(
+                STORE.get(sid), "fail_open", hook="pre_llm_call",
+                reason="exception", error=type(exc).__name__, turn_id=tid,
+            )
         except Exception:
             pass
     # Intentionally return None — no prompt injection.
@@ -77,14 +92,17 @@ def _on_pre_tool_call(
     args: Optional[Dict[str, Any]] = None,
     session_id: str = "",
     task_id: str = "",
+    turn_id: str = "",
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
     """F2: duplicate suppression. Only Hermes-recognized block shape may deny a tool."""
+    tid = turn_id or str(kwargs.get("turn_id") or "")
     try:
         out = check_duplicate(
             tool_name=tool_name,
             args=args,
             session_id=_session_key(session_id, task_id),
+            turn_id=tid,
             **kwargs,
         )
     except Exception as exc:
@@ -93,7 +111,7 @@ def _on_pre_tool_call(
             record_event(
                 STORE.get(_session_key(session_id, task_id)), "fail_open",
                 hook="pre_tool_call", reason="exception",
-                tool=tool_name, error=type(exc).__name__,
+                tool=tool_name, error=type(exc).__name__, turn_id=tid,
             )
         except Exception:
             pass
@@ -119,9 +137,11 @@ def _on_transform_tool_result(
     session_id: str = "",
     task_id: str = "",
     status: str = "",
+    turn_id: str = "",
     **kwargs: Any,
 ) -> Optional[str]:
     """F1: compaction. Hermes keeps the first *string* return; never return a non-str."""
+    tid = turn_id or str(kwargs.get("turn_id") or "")
     try:
         out = compact_tool_result(
             tool_name=tool_name,
@@ -130,6 +150,7 @@ def _on_transform_tool_result(
             session_id=_session_key(session_id, task_id),
             task_id=task_id,
             status=status,
+            turn_id=tid,
             **kwargs,
         )
     except Exception as exc:
@@ -138,7 +159,7 @@ def _on_transform_tool_result(
             record_event(
                 STORE.get(_session_key(session_id, task_id)), "fail_open",
                 hook="transform_tool_result", reason="exception",
-                tool=tool_name, error=type(exc).__name__,
+                tool=tool_name, error=type(exc).__name__, turn_id=tid,
             )
         except Exception:
             pass

@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional, Sequence
 
 from .config import get_config
-from .jev import judge, get_judge_override
+from .jev import judge_timed, get_judge_override
 from .renderer import fast_path_decision, render_fast_path, render_from_evidence
 from .schemas import DuplicateJudgment, RoundControlJudgment
 from .state import STORE, SessionState
@@ -45,29 +45,38 @@ def check_duplicate(
     tool_name: str,
     args: Optional[Dict[str, Any]],
     session_id: str = "",
-    **_: Any,
+    turn_id: str = "",
+    **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
     """pre_tool_call: block observational duplicates. Fail-open → None (approve)."""
     cfg = get_config()
     if not cfg.enabled:
         return None
+    tid = turn_id or str(kwargs.get("turn_id") or "")
     try:
-        return _check_duplicate(cfg, tool_name=tool_name, args=args or {}, session_id=session_id)
+        return _check_duplicate(
+            cfg, tool_name=tool_name, args=args or {}, session_id=session_id, turn_id=tid,
+        )
     except Exception as exc:
         logger.debug("duplicate check failed open: %s", exc)
         try:
             session = STORE.get(session_id)
             record_event(
                 session, "fail_open",
-                hook="pre_tool_call", reason="exception", tool=tool_name, error=type(exc).__name__,
+                hook="pre_tool_call", reason="exception", tool=tool_name,
+                error=type(exc).__name__, turn_id=tid,
             )
         except Exception:
             pass
         return None
 
 
-def _check_duplicate(cfg, *, tool_name: str, args: Dict[str, Any], session_id: str) -> Optional[Dict[str, Any]]:
+def _check_duplicate(
+    cfg, *, tool_name: str, args: Dict[str, Any], session_id: str, turn_id: str = "",
+) -> Optional[Dict[str, Any]]:
     session = STORE.get(session_id)
+    if turn_id:
+        session.last_turn_id = turn_id
 
     # Never aggressively block mutators
     if is_mutating(tool_name):
@@ -101,8 +110,11 @@ def _check_duplicate(cfg, *, tool_name: str, args: Dict[str, Any], session_id: s
     # Hermes fail-closes timed-out pre_tool_call (blocks the tool). Never make a
     # network Jev call on this hot path — use the injectable override for tests only.
     judgment = None
+    jev_ms = None
     if get_judge_override() is not None:
-        judgment = judge(DuplicateJudgment, state)
+        judgment, jev_ms = judge_timed(DuplicateJudgment, state)
+        if jev_ms is not None:
+            session.last_jev_ms = jev_ms
 
     # Deterministic fallback when Jev unavailable: same tool+args, no mutation → block
     if judgment is None:
@@ -115,12 +127,14 @@ def _check_duplicate(cfg, *, tool_name: str, args: Dict[str, Any], session_id: s
         observational = bool(judgment.is_observational)
         reason = judgment.reason or "duplicate"
 
+    extra_ms = {"jev_ms": jev_ms} if jev_ms is not None else {}
     if observational and redundancy >= cfg.dup_redundancy_min and relevance <= cfg.dup_relevance_max:
         session.duplicates_blocked += 1
         record_event(
             session, "dup_block",
             tool=tool_name, action="block", reason=reason,
             redundancy=redundancy, relevance=relevance,
+            turn_id=turn_id, **extra_ms,
         )
         return {
             "action": "block",
@@ -135,6 +149,7 @@ def _check_duplicate(cfg, *, tool_name: str, args: Dict[str, Any], session_id: s
         session, "pre_tool_allow",
         tool=tool_name, reason="below_dup_thresholds",
         redundancy=redundancy, relevance=relevance,
+        turn_id=turn_id, **extra_ms,
     )
     return None
 
@@ -169,6 +184,7 @@ def should_finish_round(
             errors=errors or [],
             mutated=mutated,
             api_call_count=api_call_count,
+            turn_id=turn_id,
         )
     except Exception as exc:
         logger.debug("round control failed open: %s", exc)
@@ -183,6 +199,7 @@ def should_finish_round(
                 tools=tool_names(tool_calls, tool_results),
                 mutated=mutated,
                 api_call_count=api_call_count,
+                turn_id=turn_id,
             )
         except Exception:
             pass
@@ -255,8 +272,11 @@ def _should_finish(
     errors: List[Dict[str, Any]],
     mutated: bool,
     api_call_count: int,
+    turn_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     session = STORE.get(session_id)
+    if turn_id:
+        session.last_turn_id = turn_id
     if user_goal and not session.user_goal:
         session.user_goal = user_goal
     session.api_call_count = api_call_count
@@ -290,6 +310,7 @@ def _should_finish(
             api_call_count=api_call_count,
             expects_explanation=expects,
             fast_path_reason=fp_reason,
+            **({"turn_id": turn_id} if turn_id else {}),
         )
         return {"action": "finish", "message": message}
 
@@ -305,7 +326,12 @@ def _should_finish(
         "mutated": mutated,
         "api_call_count": api_call_count,
     }
-    judgment = judge(RoundControlJudgment, state)
+    judgment, jev_ms = judge_timed(RoundControlJudgment, state)
+    if jev_ms is not None:
+        session.last_jev_ms = jev_ms
+    ms_kw = {"jev_ms": jev_ms} if jev_ms is not None else {}
+    tid_kw = {"turn_id": turn_id} if turn_id else {}
+
     if judgment is None:
         # Prefer structural fast-path skip reason so live logs explain *why*
         # we did not finish (file write / observational / no verify phrase).
@@ -319,6 +345,8 @@ def _should_finish(
             expects_explanation=expects,
             fast_path_reason=fp_reason,
             jev="unavailable",
+            **tid_kw,
+            **ms_kw,
         )
         return None  # fail open → continue to main model
 
@@ -337,6 +365,8 @@ def _should_finish(
             another_tool_needed=judgment.another_tool_needed,
             requires_main_model=judgment.requires_main_model,
             outcome=judgment.outcome,
+            **tid_kw,
+            **ms_kw,
         )
         return {"action": "continue"}
 
@@ -358,6 +388,8 @@ def _should_finish(
             fast_path_reason=fp_reason,
             goal_satisfied=judgment.goal_satisfied,
             outcome=judgment.outcome,
+            **tid_kw,
+            **ms_kw,
         )
         return {"action": "continue"}
 
@@ -375,5 +407,7 @@ def _should_finish(
         evidence_sufficient=judgment.evidence_sufficient,
         requires_main_model=judgment.requires_main_model,
         outcome=judgment.outcome,
+        **tid_kw,
+        **ms_kw,
     )
     return {"action": "finish", "message": message}

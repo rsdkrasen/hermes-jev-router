@@ -62,10 +62,14 @@ def test_record_event_writes_parseable_jsonl(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     reload_config()
     s = STORE.get("log1")
+    s.user_goal = "Ship the router\nwith care"
+    s.mutation_epoch = 2
+    s.main_model_calls_avoided = 4
     record_event(
         s, "round_continue",
         action="continue", reason="file_mutation_no_fast_path",
         tools=["write_file"], mutated=True, api_call_count=2,
+        turn_id="turn-42",
         # Must be stripped — never land in the file
         content="SECRET body api_key=sk-abc",
         result="should not appear",
@@ -80,6 +84,12 @@ def test_record_event_writes_parseable_jsonl(tmp_path, monkeypatch):
     assert "content" not in last
     assert "result" not in last
     assert last.get("api_key") == "***"
+    assert last["seq"] == 1
+    assert last["turn_id"] == "turn-42"
+    assert last["goal_preview"] == "Ship the router with care"
+    assert last["mutation_epoch"] == 2
+    assert last["main_model_calls_avoided"] == 4
+    assert "jev_ms" not in last  # no judge ran
     # decisions.jsonl mirror
     dec = _read_jsonl(decisions_log_path())
     assert any(e["event"] == "round_continue" for e in dec)
@@ -109,6 +119,10 @@ def test_write_file_lint_ok_continues_with_logged_reason(tmp_path, monkeypatch):
     assert cont[-1]["reason"] == "file_mutation_no_fast_path"
     assert "write_file" in cont[-1].get("tools", [])
     assert cont[-1].get("mutated") is True
+    assert "seq" in cont[-1]
+    assert "mutation_epoch" in cont[-1]
+    assert "main_model_calls_avoided" in cont[-1]
+    assert "goal_preview" in cont[-1]
 
 
 def test_read_file_token_looking_continues(tmp_path, monkeypatch):
@@ -212,6 +226,7 @@ def test_jev_finish_logs_judgment_reason(tmp_path, monkeypatch):
         statuses=["ok"],
         mutated=False,
         api_call_count=2,
+        turn_id="t-jev-1",
     )
     # expects_explanation blocks fast path; Jev may still finish if thresholds met
     # and can_render — but expects_explanation on session doesn't automatically
@@ -222,6 +237,11 @@ def test_jev_finish_logs_judgment_reason(tmp_path, monkeypatch):
     fin = [e for e in events if e.get("event") == "round_finish"]
     assert fin and fin[-1]["reason"] == "jev_judgment"
     assert "goal_satisfied" in fin[-1]
+    assert fin[-1]["turn_id"] == "t-jev-1"
+    assert isinstance(fin[-1].get("jev_ms"), (int, float))
+    assert fin[-1]["jev_ms"] >= 0
+    assert fin[-1]["goal_preview"].startswith("summarize test results")
+    assert "seq" in fin[-1]
 
 
 def test_thresholds_not_met_logged(tmp_path, monkeypatch):
@@ -242,3 +262,51 @@ def test_thresholds_not_met_logged(tmp_path, monkeypatch):
     events = _read_jsonl(debug_log_path())
     cont = [e for e in events if e.get("event") == "round_continue"]
     assert cont and cont[-1]["reason"] == "thresholds_not_met"
+
+
+def test_seq_monotonic_across_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reload_config()
+    s = STORE.get("seq1")
+    s.user_goal = "one two three"
+    record_event(s, "preflight", goal_kind="other")
+    record_event(s, "round_continue", action="continue", reason="observational_only")
+    record_event(s, "round_finish", action="finish", reason="jev_judgment")
+    events = _read_jsonl(debug_log_path())
+    seqs = [e["seq"] for e in events if e.get("session_id") == "seq1"]
+    assert seqs == [1, 2, 3]
+
+
+def test_goal_preview_redacts_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reload_config()
+    s = STORE.get("gp1")
+    s.user_goal = "deploy with api_key=sk-abcdefghijklmnopqrstuvwxyz123456"
+    record_event(s, "preflight", goal_kind="other")
+    last = _read_jsonl(debug_log_path())[-1]
+    preview = last["goal_preview"]
+    assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in preview
+    assert "REDACTED" in preview or preview == "***" or "sk-***" in preview
+
+
+def test_fast_path_finish_omits_jev_ms(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reload_config()
+    set_judge_override(lambda *a, **k: None)
+    session = STORE.get("dl_term_ms")
+    session.expects_explanation = False
+    out = should_finish_round(
+        session_id="dl_term_ms",
+        user_goal="run tests",
+        tool_calls=[{"name": "terminal"}],
+        tool_results=[{"name": "terminal", "content": "12 passed", "status": "ok"}],
+        statuses=["ok"],
+        mutated=False,
+        api_call_count=1,
+        turn_id="t-fp",
+    )
+    assert out and out["action"] == "finish"
+    fin = [e for e in _read_jsonl(debug_log_path()) if e.get("event") == "round_finish"]
+    assert fin and fin[-1]["reason"] == "fast_path_terminal_verify"
+    assert "jev_ms" not in fin[-1]
+    assert fin[-1]["turn_id"] == "t-fp"

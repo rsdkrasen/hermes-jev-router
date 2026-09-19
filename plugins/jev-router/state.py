@@ -60,6 +60,10 @@ class SessionState:
     finishes: int = 0
     plan: Optional[Dict[str, Any]] = None
     turn_stats: List[Dict[str, Any]] = field(default_factory=list)
+    # Telemetry: monotonic event sequence + last judge latency / turn id
+    event_seq: int = 0
+    last_jev_ms: Optional[float] = None
+    last_turn_id: str = ""
 
     def next_seq(self) -> int:
         self.seq += 1

@@ -8,7 +8,7 @@ import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import JevConfig, get_config
-from .jev import judge
+from .jev import judge_timed
 from .schemas import CompactionJudgment, ChunkScore
 from .state import STORE
 from .telemetry import record_event
@@ -75,7 +75,8 @@ def compact_tool_result(
     session_id: str = "",
     task_id: str = "",
     status: str = "",
-    **_: Any,
+    turn_id: str = "",
+    **kwargs: Any,
 ) -> Optional[str]:
     """Return compacted string or None to leave result unchanged (fail-open)."""
     cfg = get_config()
@@ -87,15 +88,22 @@ def compact_tool_result(
         # Too short to consider — silent (would drown decision logs).
         return None
 
+    tid = turn_id or str(kwargs.get("turn_id") or "")
     session = STORE.get(session_id)
+    if tid:
+        session.last_turn_id = tid
     try:
-        out = _compact(cfg, tool_name=tool_name, args=args or {}, result=result, session_id=session_id, status=status)
+        out = _compact(
+            cfg, tool_name=tool_name, args=args or {}, result=result,
+            session_id=session_id, status=status, turn_id=tid,
+        )
         if out is None:
             # Eligible size but left unchanged (e.g. small JSON, keep-all chunks).
             record_event(
                 session, "compact_skip",
                 tool=tool_name, reason="no_reduction",
                 chars_in=len(result), chars_out=len(result),
+                turn_id=tid,
             )
         return out
     except Exception as exc:
@@ -104,7 +112,7 @@ def compact_tool_result(
             session, "fail_open",
             hook="transform_tool_result", reason="exception",
             tool=tool_name, error=type(exc).__name__,
-            chars_in=len(result),
+            chars_in=len(result), turn_id=tid,
         )
         return None
 
@@ -117,6 +125,7 @@ def _compact(
     result: str,
     session_id: str,
     status: str,
+    turn_id: str = "",
 ) -> Optional[str]:
     # Conservative with JSON: only light sampling if huge, never score-rewrite structure.
     if _is_mostly_json(result):
@@ -131,7 +140,8 @@ def _compact(
         session.compaction_events += 1
         record_event(session, "compact_done", tool=tool_name, reason="json_sample",
                      chars_in=len(result), chars_out=len(sampled),
-                     original=len(result), kept=len(sampled))
+                     original=len(result), kept=len(sampled),
+                     turn_id=turn_id)
         return header + sampled
 
     working = result
@@ -156,7 +166,9 @@ def _compact(
             {"index": i, "preview": c[:240], "diagnostic": i in diag} for i, c in enumerate(to_score)
         ],
     }
-    judgment = judge(CompactionJudgment, state)
+    judgment, jev_ms = judge_timed(CompactionJudgment, state)
+    if jev_ms is not None:
+        session.last_jev_ms = jev_ms
 
     keep: set[int] = set(diag)
     if judgment and judgment.scores:
@@ -188,10 +200,12 @@ def _compact(
 
     body = "".join(parts)
     session.compaction_events += 1
+    ms_kw = {"jev_ms": jev_ms} if jev_ms is not None else {}
     record_event(
         session, "compact_done",
         tool=tool_name, reason="chunk_select",
         chars_in=len(result), chars_out=len(body),
         original=len(result), kept_chunks=len(ordered), total_chunks=len(to_score),
+        turn_id=turn_id, **ms_kw,
     )
     return _header(len(result), len(ordered), len(to_score)) + body

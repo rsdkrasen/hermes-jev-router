@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Optional, Type, TypeVar
+import time
+from typing import Any, Callable, Dict, Optional, Tuple, Type, TypeVar
 
 from pydantic import BaseModel
 
@@ -17,6 +18,10 @@ T = TypeVar("T", bound=BaseModel)
 # Injectable judge for tests. Signature: (model, output_type, state_dict) -> model_instance | None
 _JUDGE_OVERRIDE: Optional[Callable[..., Any]] = None
 
+# Side-channel: latency of the most recent override/network judge attempt (ms), or None
+# when judge() returned early without invoking a judge (disabled / missing key).
+_last_judge_ms: Optional[float] = None
+
 
 def set_judge_override(fn: Optional[Callable[..., Any]]) -> None:
     """Tests inject a mock judge; pass None to restore real client."""
@@ -29,12 +34,23 @@ def get_judge_override() -> Optional[Callable[..., Any]]:
     return _JUDGE_OVERRIDE
 
 
+def get_last_judge_ms() -> Optional[float]:
+    """Milliseconds for the last override/network judge call, or None if none ran."""
+    return _last_judge_ms
+
+
 def judge(output_type: Type[T], state: Dict[str, Any], *, model: Optional[str] = None) -> Optional[T]:
     """Ask Jev for a typed judgment.
 
     Returns a Pydantic model instance, or None on any failure (fail-open).
     State is redacted before leaving this process.
+
+    Sets module ``_last_judge_ms`` when an override or network judge actually runs;
+    clears it to None on early exits (disabled / no API key).
     """
+    global _last_judge_ms
+    _last_judge_ms = None
+
     cfg = get_config()
     if not cfg.enabled:
         return None
@@ -43,6 +59,7 @@ def judge(output_type: Type[T], state: Dict[str, Any], *, model: Optional[str] =
     model_id = model or cfg.model
 
     if _JUDGE_OVERRIDE is not None:
+        t0 = time.perf_counter()
         try:
             result = _JUDGE_OVERRIDE(model_id, output_type, safe_state)
             if result is None:
@@ -55,11 +72,14 @@ def judge(output_type: Type[T], state: Dict[str, Any], *, model: Optional[str] =
         except Exception as exc:
             logger.debug("jev override judge failed open: %s", exc)
             return None
+        finally:
+            _last_judge_ms = round((time.perf_counter() - t0) * 1000.0, 3)
 
     if not cfg.typesafe_ready:
         logger.debug("jev: TYPESAFE_API_KEY missing or disabled — skip")
         return None
 
+    t0 = time.perf_counter()
     try:
         import concurrent.futures
 
@@ -73,6 +93,19 @@ def judge(output_type: Type[T], state: Dict[str, Any], *, model: Optional[str] =
     except Exception as exc:
         logger.debug("jev judge failed open: %s", exc)
         return None
+    finally:
+        _last_judge_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+
+
+def judge_timed(
+    output_type: Type[T],
+    state: Dict[str, Any],
+    *,
+    model: Optional[str] = None,
+) -> Tuple[Optional[T], Optional[float]]:
+    """Like ``judge`` but also returns latency ms (None when no judge call ran)."""
+    result = judge(output_type, state, model=model)
+    return result, _last_judge_ms
 
 
 def _judge_pydantic_ai(model_id: str, output_type: Type[T], state: Dict[str, Any]) -> Optional[T]:

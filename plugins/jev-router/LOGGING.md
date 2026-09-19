@@ -19,8 +19,9 @@ Resolution order:
 The same directory also gets `decisions.jsonl` (subset of decision events for easy grepping). Hermes console logs get one-line summaries such as:
 
 ```text
-jev-router decision=continue reason=file_mutation_no_fast_path tools=write_file mutated=true
-jev-router decision=finish reason=fast_path_terminal_verify tools=terminal mutated=false
+jev-router decision=continue reason=file_mutation_no_fast_path tools=write_file mutated=true turn_id=abc seq=3
+jev-router decision=finish reason=fast_path_terminal_verify tools=terminal mutated=false seq=4
+jev-router decision=finish reason=jev_judgment tools=terminal jev_ms=412.5 seq=5
 ```
 
 Disable with `JEV_TELEMETRY_ENABLED=false`.
@@ -56,6 +57,18 @@ Disable with `JEV_TELEMETRY_ENABLED=false`.
 
 ## Fields (typical)
 
-`ts`, `session_id`, `event`, `action`, `reason`, `tools`, `mutated`, `expects_explanation`, `api_call_count`, judgment scores when present (`goal_satisfied`, …), `chars_in` / `chars_out` for compaction.
+Always / auto-attached from session when available:
 
-Never logged: raw tool `content` / `result` / `args` / API keys / tokens.
+| Field | Meaning |
+|-------|---------|
+| `ts`, `session_id`, `event` | Envelope |
+| `seq` | Monotonic event sequence within the session (ordering) |
+| `turn_id` | Hermes turn id from hook kwargs when provided |
+| `goal_preview` | First ~80 chars of `user_goal` (newlines stripped; secrets redacted) |
+| `mutation_epoch` | Session mutation counter at event time |
+| `main_model_calls_avoided` | Session skip counter at event time |
+| `jev_ms` | Judge latency in ms when an override/network Jev call ran; **omitted** otherwise |
+
+Decision-specific: `action`, `reason`, `tools`, `mutated`, `expects_explanation`, `api_call_count`, judgment scores when present (`goal_satisfied`, …), `chars_in` / `chars_out` for compaction.
+
+Never logged: raw tool `content` / `result` / `args` / API keys / tokens / full huge goals.
