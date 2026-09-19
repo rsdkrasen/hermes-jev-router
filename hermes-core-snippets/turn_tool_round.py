@@ -255,6 +255,66 @@ def _abbreviate_text(text: str, limit: int) -> str:
     return text[: max(0, limit - 3)] + "..."
 
 
+def _tool_result_status_for_control(content_s: str) -> str:
+    """Classify tool-result content as ok/error without JSON null-error false positives.
+
+    Prefer strong verify success phrases → ok unless a clear real failure is present
+    (traceback, ``exception:``, fatal error, command failed, non-zero exit_code).
+    Do not treat bare ``"error": null`` / empty / false JSON keys as failure.
+    Uses word-boundary / structured checks instead of naive ``t in low`` substrings.
+    """
+    import re as _re
+
+    text = content_s if isinstance(content_s, str) else str(content_s or "")
+    low = text.lower()
+
+    _SUCCESS_PHRASES = (
+        "0 failures",
+        "0 failed",
+        "all tests passed",
+        "tests passed",
+    )
+    _SUCCESS_VERIFY_RE = _re.compile(
+        r"(?i)(?<![A-Za-z0-9_])\d+\s+passed(?![A-Za-z0-9_])"
+    )
+    has_success = any(p in low for p in _SUCCESS_PHRASES) or bool(
+        _SUCCESS_VERIFY_RE.search(text)
+    )
+
+    # Scrub nullish JSON error fields before any failure token scan.
+    scrubbed = _re.sub(
+        r"""(?ix)["']?error["']?\s*:\s*(?:null|none|false|""|''|\[\s*\]|\{\s*\})""",
+        " ",
+        text,
+    )
+    for phrase in _SUCCESS_PHRASES:
+        scrubbed = _re.sub(_re.escape(phrase), " ", scrubbed, flags=_re.IGNORECASE)
+    scrubbed = _SUCCESS_VERIFY_RE.sub(" ", scrubbed)
+
+    # Clear real failures (structured / phrase-level).
+    _CLEAR_FAILURE_RE = _re.compile(
+        r"(?i)(?<![A-Za-z0-9_])("
+        r"traceback|"
+        r"exception\s*:|"
+        r"fatal\s+error|"
+        r"command\s+failed|"
+        r"exit[_ ]?code\s*[:=]\s*[1-9]\d*"
+        r")(?![A-Za-z0-9_])"
+    )
+    if _CLEAR_FAILURE_RE.search(scrubbed):
+        return "error"
+
+    # Word-boundary failure tokens (avoid matching inside longer identifiers).
+    _FAIL_WORD_RE = _re.compile(
+        r"(?i)(?<![A-Za-z0-9_])(error|failed|failure|exception|fatal)(?![A-Za-z0-9_])"
+    )
+    if has_success:
+        # Strong verify success wins unless a clear/word failure remains after scrub.
+        return "error" if _FAIL_WORD_RE.search(scrubbed) else "ok"
+
+    return "error" if _FAIL_WORD_RE.search(scrubbed) else "ok"
+
+
 def _summarize_round_for_control(*, assistant_message: Any, messages: Any):
     """Build abbreviated tool_calls / tool_results / statuses for post_tool_round_control."""
     import json as _json
@@ -285,8 +345,7 @@ def _summarize_round_for_control(*, assistant_message: Any, messages: Any):
             continue
         content = msg.get("content") or ""
         content_s = content if isinstance(content, str) else str(content)
-        low = content_s.lower()
-        status = "error" if any(t in low for t in ("error", "traceback", "exception", "failed", "fatal")) else "ok"
+        status = _tool_result_status_for_control(content_s)
         statuses.append(status)
         entry = {
             "name": msg.get("name") or "",

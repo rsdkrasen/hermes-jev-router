@@ -19,9 +19,9 @@ Resolution order:
 The same directory also gets `decisions.jsonl` (subset of decision events for easy grepping). Hermes console logs get one-line summaries such as:
 
 ```text
-jev-router decision=continue reason=file_mutation_no_fast_path tools=write_file mutated=true turn_id=abc seq=3
-jev-router decision=finish reason=fast_path_terminal_verify tools=terminal mutated=false seq=4
-jev-router decision=finish reason=jev_judgment tools=terminal jev_ms=412.5 seq=5
+jev-router decision=continue reason=file_mutation_no_fast_path tools=write_file statuses=[ok] mutated=true turn_id=abc seq=3
+jev-router decision=finish reason=fast_path_terminal_verify tools=terminal statuses=[ok] mutated=false seq=4
+jev-router decision=finish reason=jev_judgment tools=terminal statuses=[ok] jev_ms=412.5 seq=5
 ```
 
 Disable with `JEV_TELEMETRY_ENABLED=false`.
@@ -50,6 +50,13 @@ Disable with `JEV_TELEMETRY_ENABLED=false`.
 - `cannot_render` — thresholds OK but renderer refused to invent text
 - `not_terminal_verify_tools` / `status_failure` / `failure_in_content` / `no_results`
 
+**`status_failure` false positives:** Hermes core used to mark `status=error` when tool
+JSON merely contained the substring `"error"` (e.g. `"error": null` in a successful
+terminal payload). That made live verify rounds log `round_continue reason=status_failure`
+even when content showed `12 passed` / `all tests passed`. The plugin now overrides that
+gate when strong verify success is present and the scrubbed failure scan is clean (nullish
+`"error"` JSON keys are ignored). Prefer the core patch so statuses themselves are `ok`.
+
 ### `round_finish` reasons
 
 - `fast_path_terminal_verify` — deterministic terminal/bash success (`12 passed`, …)
@@ -69,6 +76,6 @@ Always / auto-attached from session when available:
 | `main_model_calls_avoided` | Session skip counter at event time |
 | `jev_ms` | Judge latency in ms when an override/network Jev call ran; **omitted** otherwise |
 
-Decision-specific: `action`, `reason`, `tools`, `mutated`, `expects_explanation`, `api_call_count`, judgment scores when present (`goal_satisfied`, …), `chars_in` / `chars_out` for compaction.
+Decision-specific: `action`, `reason`, `tools`, `statuses` (list of status name strings only — e.g. `["ok"]` / `["error"]` — for analyzing `status_failure` vs real failures), `mutated`, `expects_explanation`, `api_call_count`, judgment scores when present (`goal_satisfied`, …), `chars_in` / `chars_out` for compaction.
 
 Never logged: raw tool `content` / `result` / `args` / API keys / tokens / full huge goals.

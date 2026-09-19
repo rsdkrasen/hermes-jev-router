@@ -310,3 +310,52 @@ def test_fast_path_finish_omits_jev_ms(tmp_path, monkeypatch):
     assert fin and fin[-1]["reason"] == "fast_path_terminal_verify"
     assert "jev_ms" not in fin[-1]
     assert fin[-1]["turn_id"] == "t-fp"
+
+
+def test_terminal_null_error_json_finishes_and_logs_statuses(tmp_path, monkeypatch):
+    """12 passed + \"error\": null must finish even when statuses look failed."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reload_config()
+    set_judge_override(lambda *a, **k: None)
+    session = STORE.get("dl_null_err")
+    session.expects_explanation = False
+    content = '12 passed\nall tests passed\n{"error": null}'
+    out = should_finish_round(
+        session_id="dl_null_err",
+        user_goal="run tests",
+        tool_calls=[{"name": "terminal"}],
+        tool_results=[{"name": "terminal", "content": content, "status": "error"}],
+        statuses=["error"],
+        mutated=False,
+        api_call_count=1,
+        turn_id="t-null",
+    )
+    assert out is not None and out["action"] == "finish"
+    fin = [e for e in _read_jsonl(debug_log_path()) if e.get("event") == "round_finish"]
+    assert fin
+    assert fin[-1]["reason"] == "fast_path_terminal_verify"
+    assert fin[-1]["statuses"] == ["error"]  # logged as received; override still finished
+    assert fin[-1]["tools"] == ["terminal"]
+
+
+def test_write_file_with_null_error_still_continues(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reload_config()
+    set_judge_override(lambda *a, **k: None)
+    out = should_finish_round(
+        session_id="dl_write_null",
+        user_goal="edit then verify",
+        tool_calls=[{"name": "write_file"}],
+        tool_results=[{
+            "name": "write_file",
+            "content": 'bytes_written: 10\n{"error": null}\nlint: {"status": "ok"}',
+            "status": "ok",
+        }],
+        statuses=["ok"],
+        mutated=True,
+        api_call_count=1,
+    )
+    assert out is None or out.get("action") == "continue"
+    cont = [e for e in _read_jsonl(debug_log_path()) if e.get("event") == "round_continue"]
+    assert cont and cont[-1]["reason"] == "file_mutation_no_fast_path"
+    assert cont[-1]["statuses"] == ["ok"]

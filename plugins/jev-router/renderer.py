@@ -30,6 +30,14 @@ _FAILURE_RE = re.compile(
     r")(?![A-Za-z0-9_])"
 )
 
+# Harmless JSON error fields ("error": null / false / "") must not trip failure scans.
+_NULLISH_ERROR_JSON_RE = re.compile(
+    r"""(?ix)
+    ["']?error["']?\s*:\s*
+    (?:null|none|false|""|''|\[\s*\]|\{\s*\})
+    """
+)
+
 # File editors never fast-path — mid-task writes need the main model to continue.
 _FILE_MUTATION_TOOLS = frozenset(
     {
@@ -76,6 +84,18 @@ def _has_success_evidence(text: str) -> bool:
     if any(p in low for p in _SUCCESS_PHRASES):
         return True
     return bool(_SUCCESS_VERIFY_RE.search(text))
+
+
+def _scrub_for_failure_scan(text: str) -> str:
+    """Remove strong success phrases and nullish JSON error keys before failure scan."""
+    scrubbed = text
+    low = text.lower()
+    for phrase in _SUCCESS_PHRASES:
+        if phrase in low:
+            scrubbed = re.sub(re.escape(phrase), " ", scrubbed, flags=re.IGNORECASE)
+    scrubbed = _SUCCESS_VERIFY_RE.sub(" ", scrubbed)
+    scrubbed = _NULLISH_ERROR_JSON_RE.sub(" ", scrubbed)
+    return scrubbed
 
 
 def _tool_names(
@@ -134,18 +154,27 @@ def fast_path_decision(
         return False, "expects_explanation"
     if not tool_results:
         return False, "no_results"
-    if any(str(s).lower() in {"error", "failed", "failure"} for s in statuses):
-        return False, "status_failure"
 
     joined = _joined_content(tool_results)
-    # Strip strong success phrases before failure scan so "0 failed" is not a miss.
-    scrubbed = joined
-    low = joined.lower()
-    for phrase in _SUCCESS_PHRASES:
-        if phrase in low:
-            scrubbed = re.sub(re.escape(phrase), " ", scrubbed, flags=re.IGNORECASE)
-    scrubbed = _SUCCESS_VERIFY_RE.sub(" ", scrubbed)
-    if _FAILURE_RE.search(scrubbed):
+    # Strip success phrases + nullish "error" JSON before failure scan so
+    # "0 failed" / {"error": null} do not look like real failures.
+    scrubbed = _scrub_for_failure_scan(joined)
+    scrubbed_has_failure = bool(_FAILURE_RE.search(scrubbed))
+    has_verify_success = _has_success_evidence(joined)
+    status_looks_failed = any(
+        str(s).lower() in {"error", "failed", "failure"} for s in statuses
+    )
+
+    # Core may mark status=error on harmless JSON ("error": null). If content has
+    # strong verify success and the scrubbed failure scan is clean, keep evaluating
+    # fast-path instead of returning status_failure (so terminal verify can finish).
+    if status_looks_failed:
+        if has_verify_success and not scrubbed_has_failure:
+            pass  # status_failure overridden by verify success — continue gates
+        else:
+            return False, "status_failure"
+
+    if scrubbed_has_failure:
         return False, "failure_in_content"
 
     names = _tool_names(tool_calls, tool_results)

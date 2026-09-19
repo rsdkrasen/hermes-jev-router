@@ -95,3 +95,45 @@ def test_render_fast_path():
         [{"name": "terminal"}],
     )
     assert "Completed" in out or "Done" in out
+
+
+def test_fast_path_overrides_status_failure_on_null_error_json():
+    """Core may pass statuses=["error"] for {"error": null}; verify success still finishes."""
+    from renderer import fast_path_decision
+
+    mut = ("terminal", "write_file", "edit_file", "patch")
+    obs = ("read_file",)
+    content = '============================= 12 passed in 0.40s ==============================\n{"error": null, "exit_code": 0}'
+    ok, reason = fast_path_decision(
+        tool_results=[{"name": "terminal", "content": content}],
+        statuses=["error"],  # false positive from naive core substring scan
+        expects_explanation=False,
+        tool_calls=[{"name": "terminal"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=True,
+    )
+    assert ok and reason == "fast_path_terminal_verify"
+
+    # Real failure still blocked
+    ok, reason = fast_path_decision(
+        tool_results=[{"name": "terminal", "content": "12 passed\nTraceback (most recent call last):"}],
+        statuses=["error"],
+        expects_explanation=False,
+        tool_calls=[{"name": "terminal"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+    )
+    assert not ok and reason == "status_failure"
+
+    # write_file still never fast-paths even with verify-looking content + null error
+    ok, reason = fast_path_decision(
+        tool_results=[{"name": "write_file", "content": '12 passed\n{"error": null}'}],
+        statuses=["error"],
+        expects_explanation=False,
+        tool_calls=[{"name": "write_file"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=True,
+    )
+    assert not ok and reason == "file_mutation_no_fast_path"

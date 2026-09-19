@@ -158,6 +158,12 @@ def _human_summary(event: str, fields: Dict[str, Any]) -> str:
     tools = _tool_names_from_fields(fields)
     if tools != "-" or "tools" in fields or "tool" in fields:
         parts.append(f"tools={tools}")
+    if "statuses" in fields:
+        st = fields.get("statuses")
+        if isinstance(st, (list, tuple)):
+            parts.append("statuses=[" + ",".join(str(s) for s in st) + "]")
+        else:
+            parts.append(f"statuses={st}")
     if "mutated" in fields:
         parts.append(f"mutated={fields.get('mutated')}")
     if "expects_explanation" in fields:

@@ -217,6 +217,11 @@ def _thresholds_met(cfg, j: RoundControlJudgment) -> bool:
     )
 
 
+def _status_names(statuses: Sequence[str]) -> List[str]:
+    """Status strings only (for decision logs / analysis)."""
+    return [str(s) for s in (statuses or ())]
+
+
 def _log_continue(
     session: SessionState,
     *,
@@ -225,6 +230,7 @@ def _log_continue(
     mutated: bool,
     api_call_count: int,
     expects_explanation: bool,
+    statuses: Optional[Sequence[str]] = None,
     **extra: Any,
 ) -> None:
     record_event(
@@ -232,6 +238,7 @@ def _log_continue(
         action="continue",
         reason=reason,
         tools=tools,
+        statuses=_status_names(statuses or ()),
         mutated=mutated,
         expects_explanation=expects_explanation,
         api_call_count=api_call_count,
@@ -247,6 +254,7 @@ def _log_finish(
     mutated: bool,
     api_call_count: int,
     expects_explanation: bool,
+    statuses: Optional[Sequence[str]] = None,
     **extra: Any,
 ) -> None:
     record_event(
@@ -254,6 +262,7 @@ def _log_finish(
         action="finish",
         reason=reason,
         tools=tools,
+        statuses=_status_names(statuses or ()),
         mutated=mutated,
         expects_explanation=expects_explanation,
         api_call_count=api_call_count,
@@ -306,6 +315,7 @@ def _should_finish(
             session,
             reason="fast_path_terminal_verify",
             tools=tools,
+            statuses=statuses,
             mutated=mutated,
             api_call_count=api_call_count,
             expects_explanation=expects,
@@ -340,6 +350,7 @@ def _should_finish(
             session,
             reason=reason,
             tools=tools,
+            statuses=statuses,
             mutated=mutated,
             api_call_count=api_call_count,
             expects_explanation=expects,
@@ -355,6 +366,7 @@ def _should_finish(
             session,
             reason="thresholds_not_met",
             tools=tools,
+            statuses=statuses,
             mutated=mutated,
             api_call_count=api_call_count,
             expects_explanation=expects,
@@ -382,6 +394,7 @@ def _should_finish(
             session,
             reason="cannot_render",
             tools=tools,
+            statuses=statuses,
             mutated=mutated,
             api_call_count=api_call_count,
             expects_explanation=expects,
@@ -399,6 +412,7 @@ def _should_finish(
         session,
         reason="jev_judgment",
         tools=tools,
+        statuses=statuses,
         mutated=mutated,
         api_call_count=api_call_count,
         expects_explanation=expects,
