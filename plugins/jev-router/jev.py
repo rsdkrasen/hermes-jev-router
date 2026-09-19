@@ -24,6 +24,11 @@ def set_judge_override(fn: Optional[Callable[..., Any]]) -> None:
     _JUDGE_OVERRIDE = fn
 
 
+def get_judge_override() -> Optional[Callable[..., Any]]:
+    """Return the injectable override (None when using the real client)."""
+    return _JUDGE_OVERRIDE
+
+
 def judge(output_type: Type[T], state: Dict[str, Any], *, model: Optional[str] = None) -> Optional[T]:
     """Ask Jev for a typed judgment.
 
@@ -56,7 +61,15 @@ def judge(output_type: Type[T], state: Dict[str, Any], *, model: Optional[str] =
         return None
 
     try:
-        return _judge_pydantic_ai(model_id, output_type, safe_state)
+        import concurrent.futures
+
+        # Stay well under Hermes plugins.hook_callback_timeout (default 30s).
+        # Timed-out pre_tool_call is fail-closed; other hooks fail-open — either
+        # way we must not hang the agent loop.
+        timeout_s = float(getattr(cfg, "judge_timeout_secs", 8.0) or 8.0)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_judge_pydantic_ai, model_id, output_type, safe_state)
+            return fut.result(timeout=max(0.5, timeout_s))
     except Exception as exc:
         logger.debug("jev judge failed open: %s", exc)
         return None

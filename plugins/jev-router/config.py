@@ -113,6 +113,9 @@ class JevConfig:
     # Telemetry (F7)
     telemetry_enabled: bool = True
 
+    # Bound network Jev calls so hooks cannot hang the agent loop
+    judge_timeout_secs: float = 8.0
+
     # Tool classification
     mutating_tools: FrozenSet[str] = field(default_factory=lambda: frozenset(_DEFAULT_MUTATORS))
     observational_tools: FrozenSet[str] = field(default_factory=lambda: frozenset(_DEFAULT_OBSERVERS))
@@ -157,6 +160,7 @@ def load_config() -> JevConfig:
         autonomous_plan_enabled=_env_bool("JEV_AUTONOMOUS_PLAN_ENABLED", False),
         preflight_classify=_env_bool("JEV_PREFLIGHT_CLASSIFY", True),
         telemetry_enabled=_env_bool("JEV_TELEMETRY_ENABLED", True),
+        judge_timeout_secs=_env_float("JEV_JUDGE_TIMEOUT_SECS", 8.0),
         mutating_tools=_env_csv("JEV_MUTATING_TOOLS", _DEFAULT_MUTATORS),
         observational_tools=_env_csv("JEV_OBSERVATIONAL_TOOLS", _DEFAULT_OBSERVERS),
         result_preview_chars=_env_int("JEV_RESULT_PREVIEW_CHARS", 800),

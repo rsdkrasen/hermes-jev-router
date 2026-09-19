@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional, Sequence
 
 from .config import get_config
-from .jev import judge
+from .jev import judge, get_judge_override
 from .renderer import can_fast_path_success, render_fast_path, render_from_evidence
 from .schemas import DuplicateJudgment, RoundControlJudgment
 from .state import STORE, SessionState
@@ -71,7 +71,11 @@ def _check_duplicate(cfg, *, tool_name: str, args: Dict[str, Any], session_id: s
         "prior_mutation_epoch": prior.mutation_epoch,
         "same_args": True,
     }
-    judgment = judge(DuplicateJudgment, state)
+    # Hermes fail-closes timed-out pre_tool_call (blocks the tool). Never make a
+    # network Jev call on this hot path — use the injectable override for tests only.
+    judgment = None
+    if get_judge_override() is not None:
+        judgment = judge(DuplicateJudgment, state)
 
     # Deterministic fallback when Jev unavailable: same tool+args, no mutation → block
     if judgment is None:
@@ -166,11 +170,16 @@ def _should_finish(
     session.last_statuses = list(statuses)
     session.last_mutated = mutated
 
-    # Fast path: obvious success, no explanation expected
+    # Fast path: obvious success, no explanation expected.
+    # Pass tool taxonomy so observational-only rounds never finish early.
     if can_fast_path_success(
         tool_results=tool_results,
         statuses=statuses,
         expects_explanation=session.expects_explanation,
+        tool_calls=tool_calls,
+        mutated=mutated,
+        observational_tools=cfg.observational_tools,
+        mutating_tools=cfg.mutating_tools,
     ):
         message = render_fast_path(tool_results, tool_calls)
         session.finishes += 1

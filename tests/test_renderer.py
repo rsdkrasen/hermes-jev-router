@@ -17,28 +17,40 @@ def test_uses_judgment_bullets():
 
 
 def test_fast_path_gate():
+    mut = ("terminal", "write_file")
+    obs = ("read_file",)
     assert can_fast_path_success(
-        tool_results=[{"content": "12 passed"}],
+        tool_results=[{"name": "terminal", "content": "12 passed"}],
         statuses=["ok"],
         expects_explanation=False,
+        tool_calls=[{"name": "terminal"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=True,
     )
     assert not can_fast_path_success(
-        tool_results=[{"content": "12 passed"}],
+        tool_results=[{"name": "terminal", "content": "12 passed"}],
         statuses=["ok"],
         expects_explanation=True,
+        tool_calls=[{"name": "terminal"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=True,
     )
     assert not can_fast_path_success(
-        tool_results=[{"content": "error failed"}],
+        tool_results=[{"name": "terminal", "content": "error failed"}],
         statuses=["error"],
         expects_explanation=False,
+        tool_calls=[{"name": "terminal"}],
+        mutating_tools=mut,
+        observational_tools=obs,
+        mutated=True,
     )
 
 
 def test_render_fast_path():
-    assert "Completed" in render_fast_path(
-        [{"name": "terminal", "content": "ok done"}],
-        [{"name": "terminal"}],
-    ) or "Done" in render_fast_path(
-        [{"name": "terminal", "content": "ok done"}],
+    out = render_fast_path(
+        [{"name": "terminal", "content": "deleted ok"}],
         [{"name": "terminal"}],
     )
+    assert "Completed" in out or "Done" in out

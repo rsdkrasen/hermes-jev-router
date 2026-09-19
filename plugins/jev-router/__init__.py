@@ -73,13 +73,29 @@ def _on_pre_tool_call(
     task_id: str = "",
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
-    """F2: duplicate suppression."""
-    return check_duplicate(
-        tool_name=tool_name,
-        args=args,
-        session_id=_session_key(session_id, task_id),
-        **kwargs,
-    )
+    """F2: duplicate suppression. Only Hermes-recognized block shape may deny a tool."""
+    try:
+        out = check_duplicate(
+            tool_name=tool_name,
+            args=args,
+            session_id=_session_key(session_id, task_id),
+            **kwargs,
+        )
+    except Exception as exc:
+        logger.debug("pre_tool_call failed open: %s", exc)
+        return None
+    if out is None:
+        return None
+    # Fail-open on malformed deny directives (empty message is ignored by Hermes anyway,
+    # but a wrong action key must never look like a soft-block).
+    if not isinstance(out, dict):
+        return None
+    if out.get("action") != "block":
+        return None
+    msg = out.get("message")
+    if not isinstance(msg, str) or not msg.strip():
+        return None
+    return {"action": "block", "message": msg}
 
 
 def _on_transform_tool_result(
@@ -91,16 +107,28 @@ def _on_transform_tool_result(
     status: str = "",
     **kwargs: Any,
 ) -> Optional[str]:
-    """F1: compaction."""
-    return compact_tool_result(
-        tool_name=tool_name,
-        args=args,
-        result=result,
-        session_id=_session_key(session_id, task_id),
-        task_id=task_id,
-        status=status,
-        **kwargs,
-    )
+    """F1: compaction. Hermes keeps the first *string* return; never return a non-str."""
+    try:
+        out = compact_tool_result(
+            tool_name=tool_name,
+            args=args,
+            result=result,
+            session_id=_session_key(session_id, task_id),
+            task_id=task_id,
+            status=status,
+            **kwargs,
+        )
+    except Exception as exc:
+        logger.debug("transform_tool_result failed open: %s", exc)
+        return None
+    # Fail-open on wrong shape — a non-str would replace the tool result incorrectly
+    # on some Hermes builds, or be ignored on others. Only strings may rewrite.
+    if out is None:
+        return None
+    if not isinstance(out, str):
+        logger.debug("transform_tool_result ignored non-str %s", type(out).__name__)
+        return None
+    return out
 
 
 def _on_post_tool_call(
