@@ -235,6 +235,19 @@ No network required. Integration-style tests assert the **2 vs 1** main-model ca
 
 ---
 
+## Decision logging
+
+See [`plugins/jev-router/LOGGING.md`](plugins/jev-router/LOGGING.md).
+
+Live sessions append structured lines to `telemetry.jsonl` (and `decisions.jsonl`) next to the plugin:
+
+- Windows: `%LOCALAPPDATA%\hermes\plugins\jev-router\telemetry.jsonl`
+- Or `$HERMES_HOME/plugins/jev-router/telemetry.jsonl`
+
+Every `round_continue` / `round_finish` includes a **reason** (e.g. `file_mutation_no_fast_path`, `fast_path_terminal_verify`) so you can analyze why the main model was or was not skipped. Tool result bodies and secrets are never written.
+
+---
+
 ## Safety & privacy
 
 - Jev/TypeSafe is an **optimization**, not a dependency: timeouts, missing key, and errors **fail open**.

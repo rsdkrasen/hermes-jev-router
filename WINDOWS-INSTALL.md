@@ -82,7 +82,16 @@ Run this in the terminal and stop when done: echo jev-router-ok
 Research what a mutex is and explain the tradeoffs versus a semaphore.
 ```
 
-Optional: `...\plugins\jev-router\telemetry.jsonl`
+Decision logs (analyze continue/finish reasons):
+
+```text
+%LOCALAPPDATA%\hermes\plugins\jev-router\telemetry.jsonl
+%LOCALAPPDATA%\hermes\plugins\jev-router\decisions.jsonl
+```
+
+Example: `jev-router decision=continue reason=file_mutation_no_fast_path tools=write_file mutated=true`
+
+See `plugins/jev-router/LOGGING.md`.
 
 | Symptom | Fix |
 |--------|-----|

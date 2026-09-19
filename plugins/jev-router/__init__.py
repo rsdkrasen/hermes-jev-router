@@ -63,6 +63,12 @@ def _on_pre_llm_call(
                      expects_explanation=session.expects_explanation)
     except Exception as exc:
         logger.debug("pre_llm_call failed open: %s", exc)
+        try:
+            sid = _session_key(session_id, task_id)
+            record_event(STORE.get(sid), "fail_open", hook="pre_llm_call",
+                         reason="exception", error=type(exc).__name__)
+        except Exception:
+            pass
     # Intentionally return None — no prompt injection.
 
 
@@ -83,6 +89,14 @@ def _on_pre_tool_call(
         )
     except Exception as exc:
         logger.debug("pre_tool_call failed open: %s", exc)
+        try:
+            record_event(
+                STORE.get(_session_key(session_id, task_id)), "fail_open",
+                hook="pre_tool_call", reason="exception",
+                tool=tool_name, error=type(exc).__name__,
+            )
+        except Exception:
+            pass
         return None
     if out is None:
         return None
@@ -120,6 +134,14 @@ def _on_transform_tool_result(
         )
     except Exception as exc:
         logger.debug("transform_tool_result failed open: %s", exc)
+        try:
+            record_event(
+                STORE.get(_session_key(session_id, task_id)), "fail_open",
+                hook="transform_tool_result", reason="exception",
+                tool=tool_name, error=type(exc).__name__,
+            )
+        except Exception:
+            pass
         return None
     # Fail-open on wrong shape — a non-str would replace the tool result incorrectly
     # on some Hermes builds, or be ignored on others. Only strings may rewrite.

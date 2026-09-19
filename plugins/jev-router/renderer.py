@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .schemas import RoundControlJudgment
 
@@ -111,6 +111,68 @@ def _is_terminal_verify_tool(name: str) -> bool:
     return name in _TERMINAL_VERIFY_TOOLS or name.lower().replace("-", "_") in _TERMINAL_VERIFY_TOOLS
 
 
+def fast_path_decision(
+    *,
+    tool_results: Sequence[Dict[str, Any]],
+    statuses: Sequence[str],
+    expects_explanation: bool,
+    tool_calls: Sequence[Dict[str, Any]] = (),
+    mutated: bool = False,
+    observational_tools: Sequence[str] = (),
+    mutating_tools: Sequence[str] = (),
+) -> Tuple[bool, str]:
+    """Return ``(may_finish, reason)`` for deterministic fast-path.
+
+    Prefer continuing to the main model over finishing early. File-mutation
+    rounds and observational-only rounds never fast-path. Bare JSON success
+    tokens (ok/done/created/…) are not enough — only strong test/verify phrases.
+
+    Reason strings are stable for telemetry analysis (see LOGGING.md).
+    """
+    del mutated  # kept for call-site compatibility; taxonomy drives the gate
+    if expects_explanation:
+        return False, "expects_explanation"
+    if not tool_results:
+        return False, "no_results"
+    if any(str(s).lower() in {"error", "failed", "failure"} for s in statuses):
+        return False, "status_failure"
+
+    joined = _joined_content(tool_results)
+    # Strip strong success phrases before failure scan so "0 failed" is not a miss.
+    scrubbed = joined
+    low = joined.lower()
+    for phrase in _SUCCESS_PHRASES:
+        if phrase in low:
+            scrubbed = re.sub(re.escape(phrase), " ", scrubbed, flags=re.IGNORECASE)
+    scrubbed = _SUCCESS_VERIFY_RE.sub(" ", scrubbed)
+    if _FAILURE_RE.search(scrubbed):
+        return False, "failure_in_content"
+
+    names = _tool_names(tool_calls, tool_results)
+
+    # Never finish after file writes/edits/patches — agent must continue.
+    if any(_is_file_mutation_tool(n, mutating_tools) for n in names):
+        return False, "file_mutation_no_fast_path"
+
+    obs = set(observational_tools)
+    mut = set(mutating_tools)
+
+    # Observational-only rounds are mid-task evidence gathering.
+    if names and (obs or mut):
+        only_observational = all(n in obs for n in names) and not any(n in mut for n in names)
+        if only_observational:
+            return False, "observational_only"
+
+    # Deterministic fast-path is reserved for terminal/bash/shell verification.
+    if not names or not all(_is_terminal_verify_tool(n) for n in names):
+        return False, "not_terminal_verify_tools"
+
+    if not _has_success_evidence(joined):
+        return False, "no_verify_phrase"
+
+    return True, "fast_path_terminal_verify"
+
+
 def can_fast_path_success(
     *,
     tool_results: Sequence[Dict[str, Any]],
@@ -121,55 +183,17 @@ def can_fast_path_success(
     observational_tools: Sequence[str] = (),
     mutating_tools: Sequence[str] = (),
 ) -> bool:
-    """Obvious terminal verification success → skip Jev + main model.
-
-    Prefer continuing to the main model over finishing early. File-mutation
-    rounds and observational-only rounds never fast-path. Bare JSON success
-    tokens (ok/done/created/…) are not enough — only strong test/verify phrases.
-    """
-    del mutated  # kept for call-site compatibility; taxonomy drives the gate
-    if expects_explanation:
-        return False
-    if not tool_results:
-        return False
-    if any(str(s).lower() in {"error", "failed", "failure"} for s in statuses):
-        return False
-
-    joined = _joined_content(tool_results)
-    # Strip strong success phrases before failure scan so "0 failed" is not a miss.
-    scrubbed = joined
-    low = joined.lower()
-    for phrase in _SUCCESS_PHRASES:
-        if phrase in low:
-            # case-insensitive remove of each phrase occurrence
-            scrubbed = re.sub(re.escape(phrase), " ", scrubbed, flags=re.IGNORECASE)
-    scrubbed = _SUCCESS_VERIFY_RE.sub(" ", scrubbed)
-    if _FAILURE_RE.search(scrubbed):
-        return False
-
-    names = _tool_names(tool_calls, tool_results)
-
-    # Never finish after file writes/edits/patches — agent must continue.
-    if any(_is_file_mutation_tool(n, mutating_tools) for n in names):
-        return False
-
-    obs = set(observational_tools)
-    mut = set(mutating_tools)
-
-    # Observational-only rounds are mid-task evidence gathering.
-    if names and (obs or mut):
-        only_observational = all(n in obs for n in names) and not any(n in mut for n in names)
-        if only_observational:
-            return False
-
-    # Deterministic fast-path is reserved for terminal/bash/shell verification.
-    if not names or not all(_is_terminal_verify_tool(n) for n in names):
-        return False
-
-    if not _has_success_evidence(joined):
-        return False
-
-    return True
+    """Obvious terminal verification success → skip Jev + main model."""
+    ok, _reason = fast_path_decision(
+        tool_results=tool_results,
+        statuses=statuses,
+        expects_explanation=expects_explanation,
+        tool_calls=tool_calls,
+        mutated=mutated,
+        observational_tools=observational_tools,
+        mutating_tools=mutating_tools,
+    )
+    return ok
 
 
 def render_from_evidence(

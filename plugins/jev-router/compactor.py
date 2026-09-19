@@ -84,12 +84,28 @@ def compact_tool_result(
     if not isinstance(result, str):
         return None
     if len(result) < cfg.compaction_min_chars:
+        # Too short to consider — silent (would drown decision logs).
         return None
 
+    session = STORE.get(session_id)
     try:
-        return _compact(cfg, tool_name=tool_name, args=args or {}, result=result, session_id=session_id, status=status)
+        out = _compact(cfg, tool_name=tool_name, args=args or {}, result=result, session_id=session_id, status=status)
+        if out is None:
+            # Eligible size but left unchanged (e.g. small JSON, keep-all chunks).
+            record_event(
+                session, "compact_skip",
+                tool=tool_name, reason="no_reduction",
+                chars_in=len(result), chars_out=len(result),
+            )
+        return out
     except Exception as exc:
         logger.debug("compaction failed open: %s", exc)
+        record_event(
+            session, "fail_open",
+            hook="transform_tool_result", reason="exception",
+            tool=tool_name, error=type(exc).__name__,
+            chars_in=len(result),
+        )
         return None
 
 
@@ -113,7 +129,9 @@ def _compact(
         )
         session = STORE.get(session_id)
         session.compaction_events += 1
-        record_event(session, "compact_json_sample", tool=tool_name, original=len(result), kept=len(sampled))
+        record_event(session, "compact_done", tool=tool_name, reason="json_sample",
+                     chars_in=len(result), chars_out=len(sampled),
+                     original=len(result), kept=len(sampled))
         return header + sampled
 
     working = result
@@ -171,7 +189,9 @@ def _compact(
     body = "".join(parts)
     session.compaction_events += 1
     record_event(
-        session, "compact",
-        tool=tool_name, original=len(result), kept_chunks=len(ordered), total_chunks=len(to_score),
+        session, "compact_done",
+        tool=tool_name, reason="chunk_select",
+        chars_in=len(result), chars_out=len(body),
+        original=len(result), kept_chunks=len(ordered), total_chunks=len(to_score),
     )
     return _header(len(result), len(ordered), len(to_score)) + body
