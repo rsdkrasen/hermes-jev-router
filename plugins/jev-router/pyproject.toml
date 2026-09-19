@@ -1,0 +1,17 @@
+[project]
+name = "jev-router"
+version = "1.0.0"
+description = "Hermes plugin: TypeSafe Jev decides WHETHER; Python decides HOW"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic-ai-slim[typesafe]>=0.0.50",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["../../tests"]
+pythonpath = ["."]

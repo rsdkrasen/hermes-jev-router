@@ -1,0 +1,220 @@
+"""F2 duplicate suppression + F3 post_tool_round_control skip policy."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List, Optional, Sequence
+
+from .config import get_config
+from .jev import judge
+from .renderer import can_fast_path_success, render_fast_path, render_from_evidence
+from .schemas import DuplicateJudgment, RoundControlJudgment
+from .state import STORE, SessionState
+from .telemetry import record_event
+
+logger = logging.getLogger("hermes.plugins.jev_router.policy")
+
+
+def is_mutating(tool_name: str) -> bool:
+    return tool_name in get_config().mutating_tools
+
+
+def is_observational(tool_name: str) -> bool:
+    cfg = get_config()
+    if tool_name in cfg.mutating_tools:
+        return False
+    return tool_name in cfg.observational_tools
+
+
+def check_duplicate(
+    *,
+    tool_name: str,
+    args: Optional[Dict[str, Any]],
+    session_id: str = "",
+    **_: Any,
+) -> Optional[Dict[str, Any]]:
+    """pre_tool_call: block observational duplicates. Fail-open → None (approve)."""
+    cfg = get_config()
+    if not cfg.enabled:
+        return None
+    try:
+        return _check_duplicate(cfg, tool_name=tool_name, args=args or {}, session_id=session_id)
+    except Exception as exc:
+        logger.debug("duplicate check failed open: %s", exc)
+        return None
+
+
+def _check_duplicate(cfg, *, tool_name: str, args: Dict[str, Any], session_id: str) -> Optional[Dict[str, Any]]:
+    # Never aggressively block mutators
+    if is_mutating(tool_name):
+        return None
+
+    session = STORE.get(session_id)
+    prior = session.recent_same_tool(tool_name, args)
+    if prior is None:
+        return None
+
+    # Allow re-verify after mutation
+    if prior.mutation_epoch < session.mutation_epoch:
+        return None
+
+    if not (prior.observational or is_observational(tool_name)):
+        return None
+
+    state = {
+        "tool_name": tool_name,
+        "args": args,
+        "user_goal": session.user_goal[:300],
+        "prior_seq": prior.seq,
+        "prior_success": prior.success,
+        "mutation_epoch": session.mutation_epoch,
+        "prior_mutation_epoch": prior.mutation_epoch,
+        "same_args": True,
+    }
+    judgment = judge(DuplicateJudgment, state)
+
+    # Deterministic fallback when Jev unavailable: same tool+args, no mutation → block
+    if judgment is None:
+        redundancy, relevance = 1.0, 0.2
+        observational = True
+        reason = "identical observational call with no intervening mutation"
+    else:
+        redundancy = float(judgment.redundancy)
+        relevance = float(judgment.relevance)
+        observational = bool(judgment.is_observational)
+        reason = judgment.reason or "duplicate"
+
+    if observational and redundancy >= cfg.dup_redundancy_min and relevance <= cfg.dup_relevance_max:
+        session.duplicates_blocked += 1
+        record_event(session, "dup_block", tool=tool_name, redundancy=redundancy, relevance=relevance)
+        return {
+            "action": "block",
+            "message": (
+                f"[jev-router] Blocked duplicate observational call `{tool_name}` "
+                f"(redundancy={redundancy:.2f}, relevance={relevance:.2f}): {reason}. "
+                f"Reuse prior result (seq={prior.seq})."
+            ),
+        }
+    return None
+
+
+def should_finish_round(
+    *,
+    session_id: str = "",
+    task_id: str = "",
+    turn_id: str = "",
+    user_goal: str = "",
+    tool_calls: Optional[List[Dict[str, Any]]] = None,
+    tool_results: Optional[List[Dict[str, Any]]] = None,
+    statuses: Optional[List[str]] = None,
+    errors: Optional[List[Dict[str, Any]]] = None,
+    mutated: bool = False,
+    verification: Optional[Dict[str, Any]] = None,
+    api_call_count: int = 0,
+    **_: Any,
+) -> Optional[Dict[str, Any]]:
+    """post_tool_round_control decision. Fail-open → None (continue)."""
+    cfg = get_config()
+    if not cfg.enabled:
+        return None
+    try:
+        return _should_finish(
+            cfg,
+            session_id=session_id,
+            user_goal=user_goal,
+            tool_calls=tool_calls or [],
+            tool_results=tool_results or [],
+            statuses=statuses or [],
+            errors=errors or [],
+            mutated=mutated,
+            api_call_count=api_call_count,
+        )
+    except Exception as exc:
+        logger.debug("round control failed open: %s", exc)
+        return None
+
+
+def _thresholds_met(cfg, j: RoundControlJudgment) -> bool:
+    return (
+        j.goal_satisfied >= cfg.goal_satisfied_min
+        and j.evidence_sufficient >= cfg.evidence_sufficient_min
+        and j.contains_failure <= cfg.contains_failure_max
+        and j.another_tool_needed <= cfg.another_tool_needed_max
+        and j.requires_main_model <= cfg.requires_main_model_max
+        and j.outcome == "success"
+    )
+
+
+def _should_finish(
+    cfg,
+    *,
+    session_id: str,
+    user_goal: str,
+    tool_calls: List[Dict[str, Any]],
+    tool_results: List[Dict[str, Any]],
+    statuses: List[str],
+    errors: List[Dict[str, Any]],
+    mutated: bool,
+    api_call_count: int,
+) -> Optional[Dict[str, Any]]:
+    session = STORE.get(session_id)
+    if user_goal and not session.user_goal:
+        session.user_goal = user_goal
+    session.api_call_count = api_call_count
+    session.last_tool_calls = list(tool_calls)
+    session.last_tool_results = list(tool_results)
+    session.last_statuses = list(statuses)
+    session.last_mutated = mutated
+
+    # Fast path: obvious success, no explanation expected
+    if can_fast_path_success(
+        tool_results=tool_results,
+        statuses=statuses,
+        expects_explanation=session.expects_explanation,
+    ):
+        message = render_fast_path(tool_results, tool_calls)
+        session.finishes += 1
+        session.main_model_calls_avoided += 1
+        record_event(session, "finish_fast_path", api_call_count=api_call_count)
+        return {"action": "finish", "message": message}
+
+    state = {
+        "user_goal": (user_goal or session.user_goal)[:400],
+        "expects_explanation": session.expects_explanation,
+        "tool_calls": tool_calls,
+        "tool_results": [
+            {**r, "content": str(r.get("content") or "")[: cfg.result_preview_chars]} for r in tool_results
+        ],
+        "statuses": statuses,
+        "errors": errors[:5],
+        "mutated": mutated,
+        "api_call_count": api_call_count,
+    }
+    judgment = judge(RoundControlJudgment, state)
+    if judgment is None:
+        return None  # fail open → continue to main model
+
+    if not _thresholds_met(cfg, judgment):
+        record_event(
+            session, "continue_round",
+            goal_satisfied=judgment.goal_satisfied,
+            requires_main_model=judgment.requires_main_model,
+            outcome=judgment.outcome,
+        )
+        return {"action": "continue"}
+
+    message = render_from_evidence(
+        user_goal=user_goal or session.user_goal,
+        tool_calls=tool_calls,
+        tool_results=tool_results,
+        judgment=judgment,
+    )
+    if not message:
+        # Thresholds say finish but renderer cannot — continue to model (never invent)
+        record_event(session, "continue_cannot_render")
+        return {"action": "continue"}
+
+    session.finishes += 1
+    session.main_model_calls_avoided += 1
+    record_event(session, "finish_jev", outcome=judgment.outcome)
+    return {"action": "finish", "message": message}

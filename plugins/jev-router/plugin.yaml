@@ -1,0 +1,23 @@
+name: jev-router
+version: 1.0.0
+description: "Jev/TypeSafe router — Jev decides WHETHER the main model is needed; Python decides HOW. Compacts tool results, suppresses observational duplicates, and can finish a tool round without another provider API call via post_tool_round_control."
+author: "Krasen Hristov / TypeSafe"
+hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - transform_tool_result
+  - post_tool_call
+  - post_tool_round_control
+  - on_session_end
+requires_core_patch: hermes-post-tool-round-control
+config:
+  model:
+    type: string
+    default: "typesafe:jev-1.13.0"
+    description: "Jev model id (typesafe:jev-1.13.0 or typesafe:jev-latest)"
+  compaction_min_chars:
+    type: integer
+    default: 12000
+  autonomous_plan_enabled:
+    type: boolean
+    default: false

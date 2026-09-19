@@ -1,0 +1,2 @@
+pydantic-ai-slim[typesafe]>=0.0.50
+pydantic>=2.0
